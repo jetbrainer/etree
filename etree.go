@@ -439,11 +439,15 @@ func newDecoder(r io.Reader, settings ReadSettings) *xml.Decoder {
 func (d *Document) WriteTo(w io.Writer) (n int64, err error) {
 	xw := newXmlWriter(w)
 	b := bufio.NewWriter(xw)
-	for _, c := range d.Child {
-		c.WriteTo(b, &d.WriteSettings)
-	}
+	d.writeTo(b)
 	err, n = b.Flush(), xw.bytes
 	return
+}
+
+func (d *Document) writeTo(w Writer) {
+	for _, c := range d.Child {
+		c.WriteTo(w, &d.WriteSettings)
+	}
 }
 
 // WriteToFile serializes the document out to the file at path 'filepath'.
@@ -460,7 +464,9 @@ func (d *Document) WriteToFile(filepath string) error {
 // WriteToBytes serializes this document into a slice of bytes.
 func (d *Document) WriteToBytes() (b []byte, err error) {
 	var buf bytes.Buffer
-	if _, err = d.WriteTo(&buf); err != nil {
+	w := bufio.NewWriter(&buf)
+	d.writeTo(w)
+	if err = w.Flush(); err != nil {
 		return
 	}
 	return buf.Bytes(), nil
@@ -1078,10 +1084,7 @@ func (e *Element) FindElement(path string) *Element {
 // FindElementPath returns the first element matched by the 'path' object. The
 // function returns nil if no element is found using the path.
 func (e *Element) FindElementPath(path Path) *Element {
-	for element := range path.traverse(e) {
-		return element
-	}
-	return nil
+	return path.first(e)
 }
 
 // FindElements returns a slice of elements matched by the XPath-like 'path'
@@ -1376,7 +1379,7 @@ func (e *Element) Index() int {
 // WriteTo serializes the element to the writer w.
 func (e *Element) WriteTo(w Writer, s *WriteSettings) {
 	w.WriteByte('<')
-	w.WriteString(e.FullTag())
+	writeQName(w, e.Space, e.Tag)
 	for _, a := range e.Attr {
 		w.WriteByte(' ')
 		a.WriteTo(w, s)
@@ -1386,16 +1389,16 @@ func (e *Element) WriteTo(w Writer, s *WriteSettings) {
 		for _, c := range e.Child {
 			c.WriteTo(w, s)
 		}
-		w.Write([]byte{'<', '/'})
-		w.WriteString(e.FullTag())
+		w.WriteString("</")
+		writeQName(w, e.Space, e.Tag)
 		w.WriteByte('>')
 	} else {
 		if s.CanonicalEndTags {
-			w.Write([]byte{'>', '<', '/'})
-			w.WriteString(e.FullTag())
+			w.WriteString("></")
+			writeQName(w, e.Space, e.Tag)
 			w.WriteByte('>')
 		} else {
-			w.Write([]byte{'/', '>'})
+			w.WriteString("/>")
 		}
 	}
 }
@@ -1504,7 +1507,7 @@ func (a *Attr) NamespaceURI() string {
 
 // WriteTo serializes the attribute to the writer.
 func (a *Attr) WriteTo(w Writer, s *WriteSettings) {
-	w.WriteString(a.FullKey())
+	writeQName(w, a.Space, a.Key)
 	if s.AttrSingleQuote {
 		w.WriteString(`='`)
 	} else {
@@ -1522,6 +1525,14 @@ func (a *Attr) WriteTo(w Writer, s *WriteSettings) {
 	} else {
 		w.WriteByte('"')
 	}
+}
+
+func writeQName(w Writer, space, local string) {
+	if space != "" {
+		w.WriteString(space)
+		w.WriteByte(':')
+	}
+	w.WriteString(local)
 }
 
 // NewText creates an unparented CharData token containing simple text data.

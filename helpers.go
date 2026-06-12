@@ -330,55 +330,74 @@ const (
 
 // escapeString writes an escaped version of a string to the writer.
 func escapeString(w Writer, s string, m escapeMode) {
-	var esc []byte
 	last := 0
 	for i := 0; i < len(s); {
-		r, width := utf8.DecodeRuneInString(s[i:])
-		i += width
-		switch r {
-		case '&':
-			esc = []byte("&amp;")
-		case '<':
-			esc = []byte("&lt;")
-		case '>':
-			if m == escapeCanonicalAttr {
-				continue
-			}
-			esc = []byte("&gt;")
-		case '\'':
-			if m != escapeNormal {
-				continue
-			}
-			esc = []byte("&apos;")
-		case '"':
-			if m == escapeCanonicalText {
-				continue
-			}
-			esc = []byte("&quot;")
-		case '\t':
-			if m != escapeCanonicalAttr {
-				continue
-			}
-			esc = []byte("&#x9;")
-		case '\n':
-			if m != escapeCanonicalAttr {
-				continue
-			}
-			esc = []byte("&#xA;")
-		case '\r':
-			if m == escapeNormal {
-				continue
-			}
-			esc = []byte("&#xD;")
-		default:
+		c := s[i]
+		var esc string
+		if c >= utf8.RuneSelf {
+			r, width := utf8.DecodeRuneInString(s[i:])
 			if !isInCharacterRange(r) || (r == 0xFFFD && width == 1) {
-				esc = []byte("\uFFFD")
-				break
+				w.WriteString(s[last:i])
+				w.WriteString("\uFFFD")
+				i += width
+				last = i
+				continue
 			}
+			i += width
 			continue
 		}
-		w.WriteString(s[last : i-width])
-		w.Write(esc)
+		switch c {
+		case '&':
+			esc = "&amp;"
+		case '<':
+			esc = "&lt;"
+		case '>':
+			if m == escapeCanonicalAttr {
+				i++
+				continue
+			}
+			esc = "&gt;"
+		case '\'':
+			if m != escapeNormal {
+				i++
+				continue
+			}
+			esc = "&apos;"
+		case '"':
+			if m == escapeCanonicalText {
+				i++
+				continue
+			}
+			esc = "&quot;"
+		case '\t':
+			if m != escapeCanonicalAttr {
+				i++
+				continue
+			}
+			esc = "&#x9;"
+		case '\n':
+			if m != escapeCanonicalAttr {
+				i++
+				continue
+			}
+			esc = "&#xA;"
+		case '\r':
+			if m == escapeNormal {
+				i++
+				continue
+			}
+			esc = "&#xD;"
+		default:
+			if c < ' ' {
+				esc = "\uFFFD"
+				break
+			}
+			i++
+			continue
+		}
+		w.WriteString(s[last:i])
+		w.WriteString(esc)
+		i++
 		last = i
 	}
 	w.WriteString(s[last:])

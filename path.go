@@ -90,6 +90,7 @@ belonging to the http://www.w3.org/TR/html4/ namespace:
 */
 type Path struct {
 	segments []segment
+	dedupe   bool
 }
 
 // ErrPath is returned by path functions when an invalid etree path is provided.
@@ -106,9 +107,9 @@ func CompilePath(path string) (Path, error) {
 	var comp compiler
 	segments := comp.parsePath(path)
 	if comp.err != ErrPath("") {
-		return Path{nil}, comp.err
+		return Path{}, comp.err
 	}
-	return Path{segments}, nil
+	return Path{segments: segments, dedupe: needsDedupe(segments)}, nil
 }
 
 // MustCompilePath creates an optimized version of an XPath-like string that
@@ -126,8 +127,8 @@ func MustCompilePath(path string) Path {
 // traverse follows the path from the element e, yielding elements that match
 // the path's selectors and filters using iterators.
 func (p Path) traverse(e *Element) iter.Seq[*Element] {
-	pather := newPather()
 	return func(yield func(*Element) bool) {
+		pather := newPather(p.dedupe)
 		pather.queue.add(node{e, p.segments})
 		for pather.queue.len() > 0 {
 			if cont := pather.eval(pather.queue.remove(), yield); !cont {
@@ -135,6 +136,11 @@ func (p Path) traverse(e *Element) iter.Seq[*Element] {
 			}
 		}
 	}
+}
+
+func (p Path) first(e *Element) *Element {
+	pather := newPather(false)
+	return pather.first(e, p.segments)
 }
 
 // A segment is a portion of a path between "/" characters.
@@ -175,17 +181,18 @@ type node struct {
 // the path query.
 type pather struct {
 	queue      queue[node]
-	results    []*Element
+	dedupe     bool
 	inResults  map[*Element]bool
 	candidates []*Element
 	scratch    []*Element // used by filters
+	level      []*Element
+	nextLevel  []*Element
 }
 
 // newPather creates a new pather instance.
-func newPather() *pather {
+func newPather(dedupe bool) *pather {
 	return &pather{
-		results:    make([]*Element, 0),
-		inResults:  make(map[*Element]bool),
+		dedupe:     dedupe,
 		candidates: make([]*Element, 0),
 		scratch:    make([]*Element, 0),
 	}
@@ -197,10 +204,190 @@ func newPather() *pather {
 func (p *pather) eval(n node, yield func(*Element) bool) bool {
 	p.candidates = p.candidates[:0]
 	seg, remain := n.segments[0], n.segments[1:]
+	if _, ok := seg.sel.(*selectDescendants); ok && len(seg.filters) == 0 && len(remain) > 0 {
+		if handled, cont := p.evalDescendants(n.e, remain, yield); handled {
+			return cont
+		}
+	}
 	seg.apply(n.e, p)
+	return p.finishEval(remain, yield)
+}
 
+func (p *pather) first(e *Element, segments []segment) *Element {
+	p.queue.add(node{e, segments})
+	for p.queue.len() > 0 {
+		if result := p.evalFirst(p.queue.remove()); result != nil {
+			return result
+		}
+	}
+	return nil
+}
+
+func (p *pather) evalFirst(n node) *Element {
+	p.candidates = p.candidates[:0]
+	seg, remain := n.segments[0], n.segments[1:]
+	if _, ok := seg.sel.(*selectDescendants); ok && len(seg.filters) == 0 && len(remain) > 0 {
+		if result, handled := p.firstDescendant(n.e, remain); handled {
+			return result
+		}
+	}
+	seg.apply(n.e, p)
+	if len(remain) == 0 {
+		if len(p.candidates) > 0 {
+			return p.candidates[0]
+		}
+		return nil
+	}
+	for _, c := range p.candidates {
+		p.queue.add(node{c, remain})
+	}
+	return nil
+}
+
+// evalDescendants handles common //tag and //* paths without first collecting
+// every descendant as an intermediate candidate.
+func (p *pather) evalDescendants(e *Element, segments []segment, yield func(*Element) bool) (bool, bool) {
+	seg, remain := segments[0], segments[1:]
+	switch sel := seg.sel.(type) {
+	case *selectChildren:
+		p.selectDescendantChildren(e)
+	case *selectChildrenByTag:
+		p.selectDescendantChildrenByTag(e, sel)
+	default:
+		return false, true
+	}
+
+	for _, f := range seg.filters {
+		f.apply(p)
+	}
+	return true, p.finishEval(remain, yield)
+}
+
+func (p *pather) firstDescendant(e *Element, segments []segment) (*Element, bool) {
+	seg, remain := segments[0], segments[1:]
+	if !canStreamDescendantFirst(seg, remain) {
+		return nil, false
+	}
+
+	p.level = p.level[:0]
+	p.nextLevel = p.nextLevel[:0]
+	for _, t := range e.Child {
+		if c, ok := t.(*Element); ok {
+			if result := p.matchDescendantFirst(c, seg, remain); result != nil {
+				return result, true
+			}
+			p.level = append(p.level, c)
+		}
+	}
+	for len(p.level) > 0 {
+		p.nextLevel = p.nextLevel[:0]
+		for _, e := range p.level {
+			for _, t := range e.Child {
+				c, ok := t.(*Element)
+				if !ok {
+					continue
+				}
+				if result := p.matchDescendantFirst(c, seg, remain); result != nil {
+					return result, true
+				}
+				p.nextLevel = append(p.nextLevel, c)
+			}
+		}
+		p.level, p.nextLevel = p.nextLevel, p.level
+	}
+	return nil, true
+}
+
+func (p *pather) matchDescendantFirst(e *Element, seg segment, remain []segment) *Element {
+	if p.matchesDescendantSegment(e, seg) {
+		if len(remain) == 0 {
+			return e
+		}
+		if result := p.firstDownward(e, remain); result != nil {
+			return result
+		}
+	}
+	return nil
+}
+
+func (p *pather) firstDownward(e *Element, segments []segment) *Element {
+	seg, remain := segments[0], segments[1:]
+	switch sel := seg.sel.(type) {
+	case *selectSelf:
+		if !p.matchesFilters(e, seg.filters) {
+			return nil
+		}
+		if len(remain) == 0 {
+			return e
+		}
+		return p.firstDownward(e, remain)
+	case *selectChildren:
+		for _, t := range e.Child {
+			c, ok := t.(*Element)
+			if !ok || !p.matchesFilters(c, seg.filters) {
+				continue
+			}
+			if len(remain) == 0 {
+				return c
+			}
+			if result := p.firstDownward(c, remain); result != nil {
+				return result
+			}
+		}
+	case *selectChildrenByTag:
+		for _, t := range e.Child {
+			c, ok := t.(*Element)
+			if !ok ||
+				!spaceMatch(sel.space, c.Space) ||
+				sel.tag != c.Tag ||
+				!p.matchesFilters(c, seg.filters) {
+				continue
+			}
+			if len(remain) == 0 {
+				return c
+			}
+			if result := p.firstDownward(c, remain); result != nil {
+				return result
+			}
+		}
+	}
+	return nil
+}
+
+func (p *pather) matchesDescendantSegment(e *Element, seg segment) bool {
+	switch sel := seg.sel.(type) {
+	case *selectChildren:
+		return p.matchesFilters(e, seg.filters)
+	case *selectChildrenByTag:
+		return spaceMatch(sel.space, e.Space) && sel.tag == e.Tag && p.matchesFilters(e, seg.filters)
+	default:
+		return false
+	}
+}
+
+func (p *pather) matchesFilters(e *Element, filters []filter) bool {
+	p.candidates = append(p.candidates[:0], e)
+	for _, f := range filters {
+		f.apply(p)
+		if len(p.candidates) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (p *pather) finishEval(remain []segment, yield func(*Element) bool) bool {
 	if len(remain) == 0 {
 		for _, c := range p.candidates {
+			if !p.dedupe {
+				if !yield(c) {
+					return false
+				}
+				continue
+			}
+			if p.inResults == nil {
+				p.inResults = make(map[*Element]bool, len(p.candidates))
+			}
 			if in := p.inResults[c]; !in {
 				p.inResults[c] = true
 				if !yield(c) {
@@ -214,6 +401,91 @@ func (p *pather) eval(n node, yield func(*Element) bool) bool {
 		}
 	}
 	return true
+}
+
+func (p *pather) selectDescendantChildren(e *Element) {
+	var queue queue[*Element]
+	for _, t := range e.Child {
+		if c, ok := t.(*Element); ok {
+			queue.add(c)
+		}
+	}
+	for queue.len() > 0 {
+		e := queue.remove()
+		p.candidates = append(p.candidates, e)
+		for _, t := range e.Child {
+			if c, ok := t.(*Element); ok {
+				queue.add(c)
+			}
+		}
+	}
+}
+
+func (p *pather) selectDescendantChildrenByTag(e *Element, sel *selectChildrenByTag) {
+	var queue queue[*Element]
+	for _, t := range e.Child {
+		if c, ok := t.(*Element); ok {
+			queue.add(c)
+		}
+	}
+	for queue.len() > 0 {
+		e := queue.remove()
+		if spaceMatch(sel.space, e.Space) && sel.tag == e.Tag {
+			p.candidates = append(p.candidates, e)
+		}
+		for _, t := range e.Child {
+			if c, ok := t.(*Element); ok {
+				queue.add(c)
+			}
+		}
+	}
+}
+
+func needsDedupe(segments []segment) bool {
+	for _, seg := range segments {
+		switch seg.sel.(type) {
+		case *selectRoot, *selectParent:
+			return true
+		}
+		for _, f := range seg.filters {
+			switch f.(type) {
+			case *filterChild, *filterChildText:
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func canStreamDescendantFirst(seg segment, remain []segment) bool {
+	switch seg.sel.(type) {
+	case *selectChildren, *selectChildrenByTag:
+	default:
+		return false
+	}
+	if hasPosFilter(seg.filters) {
+		return false
+	}
+	for _, seg := range remain {
+		switch seg.sel.(type) {
+		case *selectSelf, *selectChildren, *selectChildrenByTag:
+		default:
+			return false
+		}
+		if hasPosFilter(seg.filters) {
+			return false
+		}
+	}
+	return true
+}
+
+func hasPosFilter(filters []filter) bool {
+	for _, f := range filters {
+		if _, ok := f.(*filterPos); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // A compiler generates a compiled path from a path string.

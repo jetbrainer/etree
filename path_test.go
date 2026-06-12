@@ -224,3 +224,28 @@ func TestAbsolutePath(t *testing.T) {
 		}
 	}
 }
+
+func TestPathDeduplicatesConvergingResults(t *testing.T) {
+	doc := NewDocument()
+	if err := doc.ReadFromString(`
+<store>
+	<book>
+		<author>A</author>
+		<author>B</author>
+		<title>One</title>
+		<title>Two</title>
+	</book>
+</store>`); err != nil {
+		t.Fatal(err)
+	}
+
+	titles := doc.FindElements("//book[author]/title")
+	if len(titles) != 2 || titles[0].Text() != "One" || titles[1].Text() != "Two" {
+		t.Fatalf("etree: expected unique title results, got %d", len(titles))
+	}
+
+	books := doc.FindElements("//title/..")
+	if len(books) != 1 || books[0].Tag != "book" {
+		t.Fatalf("etree: expected one deduplicated book parent, got %d", len(books))
+	}
+}

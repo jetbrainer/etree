@@ -380,6 +380,26 @@ func TestFindElementsSeq(t *testing.T) {
 		}
 	})
 
+	t.Run("reusable compiled path sequence", func(t *testing.T) {
+		path := MustCompilePath("//title")
+		seq := store.FindElementsPathSeq(path)
+
+		countFirst := 0
+		for range seq {
+			countFirst++
+		}
+
+		countSecond := 0
+		for range seq {
+			countSecond++
+		}
+
+		if countFirst != countSecond || countFirst == 0 {
+			t.Errorf("FindElementsPathSeq should be reusable, got %d then %d",
+				countFirst, countSecond)
+		}
+	})
+
 	t.Run("empty results", func(t *testing.T) {
 		count := 0
 		for range store.FindElementsSeq("//nonexistent") {
