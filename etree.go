@@ -464,11 +464,7 @@ func (d *Document) WriteToFile(filepath string) error {
 // WriteToBytes serializes this document into a slice of bytes.
 func (d *Document) WriteToBytes() (b []byte, err error) {
 	var buf bytes.Buffer
-	w := bufio.NewWriter(&buf)
-	d.writeTo(w)
-	if err = w.Flush(); err != nil {
-		return
-	}
+	d.writeTo(&buf)
 	return buf.Bytes(), nil
 }
 

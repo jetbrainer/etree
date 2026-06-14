@@ -4,7 +4,11 @@
 
 package etree
 
-import "os"
+import (
+	"crypto/sha256"
+	"fmt"
+	"os"
+)
 
 // Create an etree Document, add XML entities to it, and serialize it
 // to stdout.
@@ -39,6 +43,20 @@ func ExampleDocument_reading() {
 	if err := doc.ReadFromFile("document.xml"); err != nil {
 		panic(err)
 	}
+}
+
+func ExampleDocument_WriteTo_hash() {
+	doc := NewDocument()
+	root := doc.CreateElement("root")
+	root.CreateElement("item").SetText("value")
+
+	h := sha256.New()
+	if _, err := doc.WriteTo(h); err != nil {
+		panic(err)
+	}
+	fmt.Printf("%x\n", h.Sum(nil))
+	// Output:
+	// 52e007935581a30c7f6b34820b8cd5abb9681ab2c9ce61aa2b6dabac053736d0
 }
 
 func ExamplePath() {

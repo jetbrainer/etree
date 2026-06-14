@@ -6,6 +6,7 @@ package etree
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/xml"
 	"errors"
 	"io"
@@ -1644,6 +1645,76 @@ func TestTokenWriteTo(t *testing.T) {
 		c.IndentWithSettings(&indentSettings)
 		c.WriteTo(&buffer, &writeSettings)
 		checkStrEq(t, buffer.String(), test.expected)
+	}
+}
+
+func TestDocumentWriteToInMemoryMatchesStreaming(t *testing.T) {
+	canonicalDoc := NewDocument()
+	canonicalDoc.WriteSettings = WriteSettings{
+		CanonicalEndTags: true,
+		CanonicalText:    true,
+		CanonicalAttrVal: true,
+	}
+	root := canonicalDoc.CreateElement("k:Root")
+	root.CreateAttr("xmlns:k", "urn:kalkan")
+	root.CreateAttr("Id", "SignedInfo-1")
+	root.CreateAttr("value", "x&y<z>\"'\t\n\r")
+	root.SetText("digest&signature < > \"'\r")
+	root.CreateElement("k:Empty")
+
+	tests := []struct {
+		name string
+		doc  *Document
+		want string
+	}{
+		{
+			name: "canonical prefixed escapes",
+			doc:  canonicalDoc,
+			want: `<k:Root xmlns:k="urn:kalkan" Id="SignedInfo-1" value="x&amp;y&lt;z>&quot;'&#x9;&#xA;&#xD;">digest&amp;signature &lt; &gt; "'&#xD;<k:Empty></k:Empty></k:Root>`,
+		},
+		{
+			name: "benchmark prefixed canonical corpus",
+			doc:  benchmarkPrefixedDocument(2, 3),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			out, err := test.doc.WriteToBytes()
+			if err != nil {
+				t.Fatal("etree: WriteToBytes() error = ", err)
+			}
+			if test.want != "" {
+				checkStrEq(t, string(out), test.want)
+			}
+
+			s, err := test.doc.WriteToString()
+			if err != nil {
+				t.Fatal("etree: WriteToString() error = ", err)
+			}
+			checkStrEq(t, s, string(out))
+
+			var buf bytes.Buffer
+			n, err := test.doc.WriteTo(&buf)
+			if err != nil {
+				t.Fatal("etree: WriteTo() error = ", err)
+			}
+			if n != int64(len(out)) {
+				t.Fatalf("etree: WriteTo() byte count = %d, want %d", n, len(out))
+			}
+			if !bytes.Equal(buf.Bytes(), out) {
+				t.Fatal("etree: WriteTo() output differs from WriteToBytes()")
+			}
+
+			materializedHash := sha256.Sum256(out)
+			streamingHash := sha256.New()
+			if _, err := test.doc.WriteTo(streamingHash); err != nil {
+				t.Fatal("etree: streaming hash WriteTo() error = ", err)
+			}
+			if !bytes.Equal(streamingHash.Sum(nil), materializedHash[:]) {
+				t.Fatal("etree: streaming hash differs from materialized hash")
+			}
+		})
 	}
 }
 
